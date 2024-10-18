@@ -1,0 +1,272 @@
+# URL Shortener API dengan MongoDB
+
+## Database Schema (MongoDB)
+
+```javascript
+// User Schema
+{
+  _id: ObjectId,
+  email: String,
+  password: String,
+  createdAt: Date,
+  lastLogin: Date,
+  isActive: Boolean
+}
+
+// URL Schema
+{
+  _id: ObjectId,
+  userId: ObjectId,
+  originalUrl: String,
+  shortCode: String,
+  createdAt: Date,
+  expiresAt: Date,
+  isCustom: Boolean,
+  analytics: {
+    totalClicks: Number,
+    uniqueClicks: Number,
+    lastAccessed: Date
+  }
+}
+
+// Click Analytics Schema
+{
+  _id: ObjectId,
+  urlId: ObjectId,
+  timestamp: Date,
+  ipAddress: String,
+  userAgent: String,
+  referer: String,
+  location: {
+    country: String,
+    city: String,
+    coordinates: [Number, Number]
+  },
+  device: {
+    type: String,
+    browser: String,
+    os: String
+  }
+}
+```
+
+## MongoDB Implementasi
+
+### 1. Database Connection
+```typescript
+import mongoose from 'mongoose';
+
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true
+    });
+    console.log('MongoDB Connected');
+  } catch (err) {
+    console.error('MongoDB connection error:', err);
+    process.exit(1);
+  }
+};
+```
+
+### 2. Mongoose Models
+```typescript
+// URL Model
+const urlSchema = new mongoose.Schema({
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  originalUrl: {
+    type: String,
+    required: true
+  },
+  shortCode: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  expiresAt: Date,
+  analytics: {
+    totalClicks: {
+      type: Number,
+      default: 0
+    },
+    uniqueClicks: {
+      type: Number,
+      default: 0
+    },
+    lastAccessed: Date
+  }
+});
+
+// Click Analytics Model
+const clickSchema = new mongoose.Schema({
+  urlId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Url',
+    required: true
+  },
+  timestamp: {
+    type: Date,
+    default: Date.now
+  },
+  ipAddress: String,
+  userAgent: String,
+  referer: String,
+  location: {
+    country: String,
+    city: String,
+    coordinates: {
+      type: [Number],
+      index: '2dsphere'
+    }
+  },
+  device: {
+    type: String,
+    browser: String,
+    os: String
+  }
+});
+```
+
+### 3. Repository Layer
+```typescript
+class UrlRepository {
+  async createUrl(urlData: CreateUrlDto): Promise<IUrl> {
+    const url = new UrlModel(urlData);
+    return await url.save();
+  }
+
+  async findByShortCode(shortCode: string): Promise<IUrl | null> {
+    return await UrlModel
+      .findOne({ shortCode })
+      .select('-__v');
+  }
+
+  async getAnalytics(urlId: string) {
+    const analytics = await ClickModel.aggregate([
+      { $match: { urlId: new mongoose.Types.ObjectId(urlId) } },
+      {
+        $group: {
+          _id: {
+            country: '$location.country',
+            device: '$device.type'
+          },
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+    return analytics;
+  }
+}
+```
+
+### 4. Indexing Strategy
+```typescript
+// URL Indexes
+urlSchema.index({ shortCode: 1 }, { unique: true });
+urlSchema.index({ userId: 1, createdAt: -1 });
+urlSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+// Click Analytics Indexes
+clickSchema.index({ urlId: 1, timestamp: -1 });
+clickSchema.index({ 'location.coordinates': '2dsphere' });
+```
+
+### 5. Aggregation Examples
+```typescript
+// Get Top Performing URLs
+async function getTopUrls() {
+  return await UrlModel.aggregate([
+    {
+      $lookup: {
+        from: 'clicks',
+        localField: '_id',
+        foreignField: 'urlId',
+        as: 'clickData'
+      }
+    },
+    {
+      $project: {
+        shortCode: 1,
+        originalUrl: 1,
+        clickCount: { $size: '$clickData' },
+        uniqueVisitors: {
+          $size: {
+            $setUnion: '$clickData.ipAddress'
+          }
+        }
+      }
+    },
+    { $sort: { clickCount: -1 } },
+    { $limit: 10 }
+  ]);
+}
+
+// Geographic Analytics
+async function getGeoAnalytics(urlId: string) {
+  return await ClickModel.aggregate([
+    {
+      $match: {
+        urlId: new mongoose.Types.ObjectId(urlId)
+      }
+    },
+    {
+      $group: {
+        _id: '$location.country',
+        visits: { $sum: 1 },
+        cities: { $addToSet: '$location.city' }
+      }
+    }
+  ]);
+}
+```
+
+## Caching dengan Redis + MongoDB
+```typescript
+async function getUrlWithCache(shortCode: string) {
+  // Try cache first
+  const cached = await redis.get(`url:${shortCode}`);
+  if (cached) return JSON.parse(cached);
+
+  // If not in cache, get from MongoDB
+  const url = await UrlModel.findOne({ shortCode });
+  if (url) {
+    // Save to cache
+    await redis.setex(
+      `url:${shortCode}`,
+      3600, // 1 hour
+      JSON.stringify(url)
+    );
+  }
+  return url;
+}
+```
+
+## MongoDB Advantages for This Project
+
+1. **Flexible Schema**
+   - Mudah menambah fields baru
+   - Nested documents untuk analytics
+   - Tidak perlu migrations
+
+2. **Scalability**
+   - Horizontal scaling dengan sharding
+   - Built-in replication
+   - Handle high write loads
+
+3. **Geospatial Features**
+   - Built-in geo queries
+   - Location-based analytics
+   - Proximity searches
+
+4. **Performance**
+   - Index support
+   - In-memory operations
+   - Agregasi pipeline
